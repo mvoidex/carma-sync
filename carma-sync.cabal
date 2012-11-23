@@ -1,0 +1,17 @@
+name:                carma-sync
+version:             0.1.0.0
+synopsis:            Save carma models to postgresql
+homepage:            https://github.com/mvoidex/carma-sync
+license:             BSD3
+license-file:        LICENSE
+author:              Alexandr `Voidex` Ruchkin
+maintainer:          voidex@live.com
+build-type:          Simple
+cabal-version:       >=1.8
+
+library
+  hs-source-dirs: src
+  exposed-modules:     
+  other-modules:       
+  build-depends:
+    base >= 4.6 && < 5.0
