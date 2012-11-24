@@ -16,7 +16,8 @@ module Carma.ModelTables (
     -- * Util
     tableByModel,
     addType,
-    typize
+    typize,
+    tableFlatFields
     ) where
 
 import Prelude hiding (log)
@@ -41,10 +42,11 @@ import qualified Data.ByteString.Lazy as B
 import Data.Aeson
 import System.FilePath
 import System.Directory
-import System.Locale
 import System.Log
 
 import qualified Database.PostgreSQL.Simple as P
+import qualified Database.PostgreSQL.Simple.ToField as P
+import qualified Database.PostgreSQL.Simple.Types as P
 
 data ModelDesc = ModelDesc {
     modelName :: String,
@@ -84,7 +86,7 @@ instance FromJSON ModelGroups where
 data TableDesc = TableDesc {
     tableName :: String,
     tableModel :: String,
-    tableParent :: [String],
+    tableParents :: [TableDesc],
     tableFields :: [TableColumn] }
         deriving (Eq, Ord, Read, Show)
 
@@ -100,14 +102,33 @@ loadTables base field_groups = do
     ms <- fmap (filter $ isSuffixOf ".js") $ getDirectoryContents base
     liftM (mergeServices . map addId) $ mapM (loadTableDesc gs base) ms
 
+execute_ :: MonadLog m => P.Connection -> P.Query -> m ()
+execute_ con q = do
+    bs <- liftIO $ P.formatQuery con q ()
+    log Trace $ T.decodeUtf8 bs
+    liftIO $ P.execute_ con q
+    return ()
+
+execute :: (MonadLog m, P.ToRow q) => P.Connection -> P.Query -> q -> m ()
+execute con q args = do
+    bs <- liftIO $ P.formatQuery con q args
+    log Trace $ T.decodeUtf8 bs
+    liftIO $ P.execute con q args
+    return ()
+
+query :: (MonadLog m, P.FromRow r, P.ToRow q) => P.Connection -> P.Query -> q -> m [r]
+query con q args = do
+    bs <- liftIO $ P.formatQuery con q args
+    log Trace $ T.decodeUtf8 bs
+    liftIO $ P.query con q args
+
 -- | Create or extend table
-createExtend :: (MonadLog m) => P.Connection -> TableDesc -> m ()
+createExtend :: MonadLog m => P.Connection -> TableDesc -> m ()
 createExtend con tbl = scope "createExtend" $ do
     exec $ createTableQuery tbl
     mapM_ exec $ extendTableQueries tbl
     where
-        exec q = ignoreError $ scope "query" $ do
-            log Trace $ fromString q
+        exec q = ignoreError $ do
             liftIO $ P.execute_ con (fromString q)
             return ()
 
@@ -138,9 +159,9 @@ insert con tbl dat = scope "insert" $ do
         (actualNames, actualDats) = removeNonColumns tbl dat
 
 -- | Remove invalid fields
-removeNonColumns :: TableDesc -> M.Map C8.ByteString C8.ByteString -> ([String], [Text])
-removeNonColumns tbl = unzip . filter ((`elem` fields) . fst) . map (C8.unpack *** T.decodeUtf8) . M.toList . typize tbl . addType tbl where
-    fields = map columnName $ tableFields tbl
+removeNonColumns :: TableDesc -> M.Map C8.ByteString C8.ByteString -> ([String], [P.Action])
+removeNonColumns tbl = unzip . filter ((`elem` fields) . fst) . map (first C8.unpack) . M.toList . typize tbl . addType tbl where
+    fields = map columnName $ tableFlatFields tbl
 
 -- | Load model description and convert to table
 loadTableDesc :: ModelGroups -> String -> String -> IO TableDesc
@@ -155,7 +176,7 @@ createTableQuery (TableDesc nm _ inhs flds) = concat $ creating ++ inherits wher
     creating = [
         "create table if not exists ", nm,
         " (", intercalate ", " (map (\(TableColumn n t) -> n ++ " " ++ t) flds), ")"]
-    inherits = if null inhs then [] else [" inherits (", intercalate ", " inhs, ")"]
+    inherits = if null inhs then [] else [" inherits (", intercalate ", " (map tableName inhs), ")"]
 
 -- | Alter table add column queries for each field of table
 extendTableQueries :: TableDesc -> [String]
@@ -242,7 +263,7 @@ mergeServices :: [TableDesc] -> [TableDesc]
 mergeServices tbls = srvBase : (srvsInherited ++ notSrvs) where
     srvBase = addColumn "type" "text" $ TableDesc "servicetbl" "service" [] srvBaseFields
     srvsInherited = map inherit srvs
-    inherit (TableDesc nm mdl inhs fs) = TableDesc nm mdl ("servicetbl" : inhs) $ fs \\ srvBaseFields
+    inherit (TableDesc nm mdl inhs fs) = TableDesc nm mdl (srvBase : inhs) $ fs \\ srvBaseFields
 
     (srvs, notSrvs) = partition ((`elem` (map addTbl services)) . tableName) tbls
     srvBaseFields = foldr1 intersect $ map tableFields srvs
@@ -264,20 +285,24 @@ unstr :: String -> C8.ByteString
 unstr = T.encodeUtf8 . T.pack
 
 -- | Convert data accord to its types
-typize :: TableDesc -> M.Map C8.ByteString C8.ByteString -> M.Map C8.ByteString C8.ByteString
-typize (TableDesc _ _ _ fs) = M.mapWithKey convertData where
-    convertData k v = fromMaybe v $ do
-        t <- fmap columnType $ find ((== (str k)) . columnName) fs
+typize :: TableDesc -> M.Map C8.ByteString C8.ByteString -> M.Map C8.ByteString P.Action
+typize tbl = M.mapWithKey convertData where
+    convertData k v = fromMaybe (P.toField v) $ do
+        t <- fmap columnType $ find ((== (str k)) . columnName) $ tableFlatFields tbl
         conv <- lookup t convertors
         return $ conv v
     convertors = [
-        ("text", id),
-        ("bool", id),
-        ("integer", id),
+        ("text", P.toField),
+        ("bool", P.toField),
+        ("integer", P.toField),
         ("timestamp", fromPosix)]
-    fromPosix :: C8.ByteString -> C8.ByteString
-    fromPosix "" = ""
-    fromPosix v = unstr . formatTime defaultTimeLocale "%F %T"
+    fromPosix :: C8.ByteString -> P.Action
+    fromPosix "" = P.toField P.Null
+    fromPosix v = P.toField . utcToLocalTime utc
         . posixSecondsToUTCTime . fromInteger . fst
         . fromMaybe notInt . C8.readInteger $ v where
             notInt = error $ "Can't read POSIX time: " ++ str v
+
+-- | Gets fields of table and its parents
+tableFlatFields :: TableDesc -> [TableColumn]
+tableFlatFields t = concatMap tableFlatFields (tableParents t) ++ tableFields t
