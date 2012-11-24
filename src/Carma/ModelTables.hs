@@ -15,7 +15,8 @@ module Carma.ModelTables (
 
     -- * Util
     tableByModel,
-    addType
+    addType,
+    typize
     ) where
 
 import Prelude hiding (log)
@@ -25,8 +26,11 @@ import Control.Applicative
 import Control.Monad
 import Control.Monad.IO.Class
 import Control.Monad.CatchIO
+import Data.Maybe (fromMaybe)
 import Data.List hiding (insert)
 import Data.Text (Text)
+import Data.Time
+import Data.Time.Clock.POSIX
 import Data.String
 import qualified Data.ByteString.Char8 as C8
 import qualified Data.Map as M
@@ -37,6 +41,7 @@ import qualified Data.ByteString.Lazy as B
 import Data.Aeson
 import System.FilePath
 import System.Directory
+import System.Locale
 import System.Log
 
 import qualified Database.PostgreSQL.Simple as P
@@ -113,7 +118,7 @@ insertUpdate con tbl i dat = scope "insertUpdate" $ do
         (fromString $ "select count(*) > 0 from " ++ tableName tbl ++ " where id = ?") (P.Only i)
     if b
         then update con tbl i dat
-        else insert con tbl dat
+        else insert con tbl (M.insert "id" i dat)
 
 update :: MonadLog m => P.Connection -> TableDesc -> C8.ByteString -> M.Map C8.ByteString C8.ByteString -> m ()
 update con tbl i dat = scope "update" $ do
@@ -127,14 +132,14 @@ update con tbl i dat = scope "update" $ do
 insert :: MonadLog m => P.Connection -> TableDesc -> M.Map C8.ByteString C8.ByteString -> m ()
 insert con tbl dat = scope "insert" $ do
     liftIO $ P.execute con
-        (fromString $ "insert into " ++ tableName tbl ++ " values (" ++ intercalate ", " (replicate (length actualDats) "?") ++ ")") actualDats
+        (fromString $ "insert into " ++ tableName tbl ++ " (" ++ intercalate ", " actualNames ++ ") values (" ++ intercalate ", " (replicate (length actualDats) "?") ++ ")") actualDats
     return ()
     where
-        (_, actualDats) = removeNonColumns tbl dat
+        (actualNames, actualDats) = removeNonColumns tbl dat
 
 -- | Remove invalid fields
 removeNonColumns :: TableDesc -> M.Map C8.ByteString C8.ByteString -> ([String], [Text])
-removeNonColumns tbl = unzip . filter ((`elem` fields) . fst) . map (C8.unpack *** T.decodeUtf8) . M.toList where
+removeNonColumns tbl = unzip . filter ((`elem` fields) . fst) . map (C8.unpack *** T.decodeUtf8) . M.toList . typize tbl . addType tbl where
     fields = map columnName $ tableFields tbl
 
 -- | Load model description and convert to table
@@ -251,3 +256,28 @@ tableByModel name = find ((== name) . fromString . tableModel)
 -- | WORKAROUND: Explicitly add type value for data in service-derived model
 addType :: TableDesc -> M.Map C8.ByteString C8.ByteString -> M.Map C8.ByteString C8.ByteString
 addType (TableDesc _ mdl _ _) dat = if mdl `elem` services then M.insert "type" (fromString mdl) dat else dat
+
+str :: C8.ByteString -> String
+str = T.unpack . T.decodeUtf8
+
+unstr :: String -> C8.ByteString
+unstr = T.encodeUtf8 . T.pack
+
+-- | Convert data accord to its types
+typize :: TableDesc -> M.Map C8.ByteString C8.ByteString -> M.Map C8.ByteString C8.ByteString
+typize (TableDesc _ _ _ fs) = M.mapWithKey convertData where
+    convertData k v = fromMaybe v $ do
+        t <- fmap columnType $ find ((== (str k)) . columnName) fs
+        conv <- lookup t convertors
+        return $ conv v
+    convertors = [
+        ("text", id),
+        ("bool", id),
+        ("integer", id),
+        ("timestamp", fromPosix)]
+    fromPosix :: C8.ByteString -> C8.ByteString
+    fromPosix "" = ""
+    fromPosix v = unstr . formatTime defaultTimeLocale "%F %T"
+        . posixSecondsToUTCTime . fromInteger . fst
+        . fromMaybe notInt . C8.readInteger $ v where
+            notInt = error $ "Can't read POSIX time: " ++ str v
