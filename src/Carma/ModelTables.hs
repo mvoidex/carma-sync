@@ -68,7 +68,7 @@ instance FromJSON ModelField where
             case mo of
                 Nothing -> pure Nothing
                 Just mo' -> case mo' of
-                    (Object mv) -> mv .:? "type"
+                    (Object mv) -> mv .:? "sqltype"
                     _ -> pure Nothing) <*>
         v .:? "type" <*>
         v .:? "groupName"
