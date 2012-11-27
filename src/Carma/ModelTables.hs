@@ -299,18 +299,40 @@ typize tbl = M.mapWithKey convertData where
     convertData k v = fromMaybe (P.toField v) $ do
         t <- fmap columnType $ find ((== (str k)) . columnName) $ tableFlatFields tbl
         conv <- lookup t convertors
-        return $ conv v
+        case conv v of
+            Left err -> error $ "Error in '" ++ str k ++ "': " ++ err
+            Right x -> return x
+
+    convertors :: [(String, C8.ByteString -> Either String P.Action)]
     convertors = [
-        ("text", P.toField),
-        ("bool", P.toField),
-        ("integer", P.toField),
+        ("text", Right . P.toField),
+        ("bool", fromB),
+        ("integer", fromI),
         ("timestamp", fromPosix)]
-    fromPosix :: C8.ByteString -> P.Action
-    fromPosix "" = P.toField P.Null
-    fromPosix v = P.toField . utcToLocalTime utc
-        . posixSecondsToUTCTime . fromInteger . fst
-        . fromMaybe notInt . C8.readInteger $ v where
-            notInt = error $ "Can't read POSIX time: " ++ str v
+
+    fromB :: C8.ByteString -> Either String P.Action
+    fromB "" = Right $ P.toField P.Null
+    fromB "1" = Right $ P.toField True
+    fromB "0" = Right $ P.toField False
+    fromB v = Left $ "Not a boolean: " ++ str v
+
+    fromI :: C8.ByteString -> Either String P.Action
+    fromI "" = Right $ P.toField P.Null
+    fromI v = do
+        x <- asInt v
+        return $ P.toField x
+
+    fromPosix :: C8.ByteString -> Either String P.Action
+    fromPosix "" = Right $ P.toField P.Null
+    fromPosix v = do
+        x <- asInt v
+        return $ P.toField $ utcToLocalTime utc
+            $ posixSecondsToUTCTime $ fromInteger x
+
+    asInt :: C8.ByteString -> Either String Integer
+    asInt v = case C8.readInteger v of
+        Just (x, "") -> Right x
+        _ -> Left $ "Not an integer: " ++ str v
 
 -- | Gets fields of table and its parents
 tableFlatFields :: TableDesc -> [TableColumn]
