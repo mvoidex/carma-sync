@@ -134,6 +134,7 @@ query con q args = do
 createExtend :: MonadLog m => P.Connection -> TableDesc -> m ()
 createExtend con tbl = scope "createExtend" $ do
     exec $ createTableQuery tbl
+    exec $ createIndexQuery tbl
     mapM_ exec $ extendTableQueries tbl
     where
         exec q = ignoreError $ do
@@ -185,6 +186,10 @@ createTableQuery (TableDesc nm _ inhs flds) = concat $ creating ++ inherits wher
         "create table if not exists ", nm,
         " (", intercalate ", " (map (\(TableColumn n t) -> n ++ " " ++ t) flds), ")"]
     inherits = if null inhs then [] else [" inherits (", intercalate ", " (map tableName inhs), ")"]
+
+-- | Make index on id
+createIndexQuery :: TableDesc -> String
+createIndexQuery (TableDesc nm _ _ _) = "create index on " ++ nm ++ " (id)"
 
 -- | Alter table add column queries for each field of table
 extendTableQueries :: TableDesc -> [String]
