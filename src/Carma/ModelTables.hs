@@ -55,6 +55,7 @@ data ModelDesc = ModelDesc {
 
 data ModelField = ModelField {
     fieldName :: String,
+    fieldSqlType :: Maybe String,
     fieldType :: Maybe String,
     fieldGroup :: Maybe String }
         deriving (Eq, Ord, Read, Show)
@@ -62,6 +63,13 @@ data ModelField = ModelField {
 instance FromJSON ModelField where
     parseJSON (Object v) = ModelField <$>
         v .: "name" <*>
+        (do
+            mo <- v .:? "meta"
+            case mo of
+                Nothing -> pure Nothing
+                Just mo' -> case mo' of
+                    (Object mv) -> mv .:? "type"
+                    _ -> pure Nothing) <*>
         v .:? "type" <*>
         v .:? "groupName"
     parseJSON _ = empty
@@ -199,20 +207,21 @@ loadGroups field_groups = do
 -- | Unfold groups, adding fields from groups to model (with underscored prefix)
 ungroup :: ModelGroups -> ModelDesc -> Either String ModelDesc
 ungroup (ModelGroups g) (ModelDesc nm fs) = (ModelDesc nm . concat) <$> mapM ungroup' fs where
-    ungroup' (ModelField fname ftype Nothing) = return [ModelField fname ftype Nothing]
-    ungroup' (ModelField fname ftype (Just gname)) =
+    ungroup' (ModelField fname sqltype ftype Nothing) = return [ModelField fname sqltype ftype Nothing]
+    ungroup' (ModelField fname sqltype ftype (Just gname)) =
         maybe
             (Left $ "Can't find group " ++ gname)
             (return . map appends)
             (M.lookup gname g)
         where
-            appends (ModelField fname' ftype' _) = ModelField (fname ++ "_" ++ fname') ftype' Nothing
+            appends (ModelField fname' sqltype' ftype' _) = ModelField (fname ++ "_" ++ fname') (sqltype' `mplus` sqltype) (ftype' `mplus` ftype) Nothing
 
 -- | Convert model description to table description with silly type converting
 retype :: ModelDesc -> Either String TableDesc
 retype (ModelDesc nm fs) = TableDesc (nm ++ "tbl") nm [] <$> mapM retype' fs where
-    retype' (ModelField fname Nothing _) = return $ TableColumn fname "text"
-    retype' (ModelField fname (Just ftype) _) = TableColumn fname <$> maybe unknown Right (lookup ftype retypes) where
+    retype' (ModelField fname (Just sqltype) _ _) = return $ TableColumn fname sqltype
+    retype' (ModelField fname Nothing Nothing _) = return $ TableColumn fname "text"
+    retype' (ModelField fname Nothing (Just ftype) _) = TableColumn fname <$> maybe unknown Right (lookup ftype retypes) where
         unknown = Left $ "Unknown type: " ++ ftype
     retypes = [
         ("datetime", "timestamp"),
