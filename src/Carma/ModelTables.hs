@@ -155,7 +155,7 @@ insertUpdate con tbl i dat = scope "insertUpdate" $ do
 update :: MonadLog m => P.Connection -> TableDesc -> C8.ByteString -> M.Map C8.ByteString C8.ByteString -> m ()
 update con tbl i dat = scope "update" $ do
     liftIO $ P.execute con
-        (fromString $ "update " ++ tableName tbl ++ " set " ++ intercalate ", " setters) actualDats
+        (fromString $ "update " ++ tableName tbl ++ " set " ++ intercalate ", " setters ++ " where id = ?") (actualDats P.:. (P.Only i))
     return ()
     where
         (actualNames, actualDats) = removeNonColumns tbl dat
