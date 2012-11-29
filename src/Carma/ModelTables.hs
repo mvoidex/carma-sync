@@ -133,8 +133,10 @@ query con q args = do
 -- | Create or extend table
 createExtend :: MonadLog m => P.Connection -> TableDesc -> m ()
 createExtend con tbl = scope "createExtend" $ do
-    exec $ createTableQuery tbl
-    exec $ createIndexQuery tbl
+    ignoreError $ liftIO $ do
+        P.execute_ con (fromString $ createTableQuery tbl)
+        P.execute_ con (fromString $ createIndexQuery tbl)
+        return ()
     mapM_ exec $ extendTableQueries tbl
     where
         exec q = ignoreError $ do
@@ -183,7 +185,7 @@ loadTableDesc g base f = do
 createTableQuery :: TableDesc -> String
 createTableQuery (TableDesc nm _ inhs flds) = concat $ creating ++ inherits where
     creating = [
-        "create table if not exists ", nm,
+        "create table ", nm,
         " (", intercalate ", " (map (\(TableColumn n t) -> n ++ " " ++ t) flds), ")"]
     inherits = if null inhs then [] else [" inherits (", intercalate ", " (map tableName inhs), ")"]
 
